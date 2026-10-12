@@ -1,0 +1,37 @@
+# Rixers Custom Voice Changer
+#
+# The engine is several gigabytes of downloaded Python and model weights, so none
+# of it belongs in the repository. Setup.bat rebuilds all of it.
+
+# --- installed environments -------------------------------------------------
+.venv/
+engine/
+.uv-cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- the shared runtime state ----------------------------------------------
+# Settings, the transcript and the emotion mapping are per-machine.
+out/*.json
+out/*.txt
+out/*.wav
+out/*.jsonl
+out/shots/
+out/style_probe/
+out/verify/
+
+# --- voices -----------------------------------------------------------------
+# A voice is a wav you supply: 3-16 s of somebody speaking. Someone else's clone
+# is not something to push.
+voices/*.wav
+voices/emotions/
+voices/*.json
+!voices/README.txt
+
+# --- editor and OS noise ----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

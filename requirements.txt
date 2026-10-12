@@ -1,0 +1,19 @@
+# Live transcription: microphone -> text file (faster-whisper on GPU)
+#
+# Install with:
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# The two nvidia-* packages ship the cuBLAS/cuDNN DLLs that CTranslate2's CUDA
+# backend loads at runtime. Without them you get:
+#   RuntimeError: Library cublas64_12.dll is not found or cannot be loaded
+# They are pure downloads (no system CUDA toolkit required).
+
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.27.0.42
+
+numpy==2.2.6
+scipy==1.15.3
+sounddevice==0.5.6

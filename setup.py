@@ -519,6 +519,8 @@ def verify_engine(log: Log) -> bool:
         "t1=time.time();r=engine.synthesize(%r);synth=time.time()-t1;"
         "print(json.dumps({'load_s':round(load,1),'synth_s':round(synth,2),"
         "'seconds':round(r['seconds'],2),'peak':r['peak'],'rms':r['rms'],"
+        "'attempts':r['attempts'],'noise_share':r['noise_share'],"
+        "'render_problem':r['render_problem'],"
         "'device':s.torch_report(),'steps':r['diffusion_steps']}))"
         % (str(HERE), SMOKE_TEXT)
     )
@@ -549,11 +551,13 @@ def verify_engine(log: Log) -> bool:
     if not payload.get("seconds"):
         log.error(f"the engine ran but produced no audio: {result.stdout[-400:]}")
         return False
-    if float(payload.get("peak") or 0) >= 0.999:
-        log.warn("the test sentence came back fully saturated - it was retried at fewer "
-                 "diffusion steps; raise it in the control panel if you hear distortion")
+    if payload.get("render_problem"):
+        log.warn(f"the test sentence needed re-rolling: {payload['render_problem']} "
+                 f"(took {payload.get('attempts')} renders) - this is the guard working, "
+                 "but a voice that keeps doing it is worth changing")
     log.info(f"ok: loaded in {payload.get('load_s')}s, spoke {payload.get('seconds')}s "
-             f"in {payload.get('synth_s')}s on {payload.get('device')}")
+             f"in {payload.get('synth_s')}s on {payload.get('device')} "
+             f"(noise {payload.get('noise_share')}, {payload.get('attempts')} render(s))")
     paths.write_marker(
         installed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         python=paths.ENGINE_PYTHON,

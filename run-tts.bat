@@ -16,14 +16,28 @@ REM  RixersVoiceChanger.bat starts the engine for you from its Dashboard.
 REM
 REM  Pass --no-wait to skip the readiness check.
 REM ===========================================================================
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Rixers speech engine
 
 set "PY=%~dp0.venv\Scripts\python.exe"
 set "ENGINE_PY=%~dp0engine\styletts2\.venv\Scripts\python.exe"
 set "WAIT=1"
-if /i "%~1"=="--no-wait" set "WAIT=0"
+set "ENGINE_ARGS="
+
+REM Split our own options from the engine's. --no-wait only tells THIS script to
+REM skip its readiness check: it must never reach the engine, whose argument
+REM parser rejects it and exits at once.
+:parse
+if "%~1"=="" goto parsed
+if /i "%~1"=="--no-wait" (
+    set "WAIT=0"
+) else (
+    set "ENGINE_ARGS=!ENGINE_ARGS! %1"
+)
+shift
+goto parse
+:parsed
 
 echo.
 echo   ============================================================
@@ -53,7 +67,7 @@ set PYTHONIOENCODING=utf-8
 
 REM The server runs in this window's console, so Ctrl+C still stops it.
 start /b "" "%ENGINE_PY%" -u "%~dp0live_transcribe\engine_tts_server.py" ^
-    --reference "%~dp0voices\default.wav" %*
+    --reference "%~dp0voices\default.wav"%ENGINE_ARGS%
 
 if "%WAIT%"=="1" (
     echo   Waiting for it to be ready ^(60-120 s is normal^)...

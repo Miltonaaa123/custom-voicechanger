@@ -68,7 +68,15 @@ def wait_for_tts(timeout: float, quiet: bool = False) -> int:
     while time.perf_counter() - started < timeout:
         info = http_json(f"http://127.0.0.1:{TTS_PORT}/health")
         if info:
-            if info.get("loaded") or info.get("reference_loaded"):
+            # "loaded" means the checkpoint is in memory and synthesis can run.
+            # "reference_loaded" only says the reference wav exists, so it must
+            # not be enough on its own - the launcher would announce READY while
+            # the model is still loading and the first synthesis would fail.
+            # It stays as the fallback for engines that never report "loaded".
+            ready = info.get("loaded")
+            if ready is None:
+                ready = info.get("reference_loaded")
+            if ready:
                 device = info.get("device")
                 voice = Path(str(info.get("reference_path") or "")).name or "default"
                 vram = info.get("vram_mb")

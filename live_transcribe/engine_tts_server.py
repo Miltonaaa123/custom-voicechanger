@@ -17,12 +17,15 @@ Two details are not obvious and both matter:
   StyleTTS 2 predates that, so its checkpoint and its ASR model fail to unpickle
   with "Weights only load failed". The patch is applied here, before the model is
   built, and it is why this file patches rather than merely calling the library.
-* **Saturation.** The duration predictor occasionally runs away and the decoder
-  returns a full-scale, clipped burst -- "earrape" -- instead of speech. It is
-  rare at the default five diffusion steps and much more likely above them, so a
-  saturated render is retried at three steps, which is the setting measured to be
-  safe. Retrying is much cheaper than the alternative, which is the user hearing
-  it.
+* **Failed renders.** StyleTTS 2 fails at random on short text, and a failed render
+  is not always loud. Sometimes the duration predictor runs away and returns a
+  full-scale, clipped burst -- "earrape"; more often it returns several seconds of
+  broadband hiss for a single word, at an ordinary level, which the peak-only check
+  that used to guard this could not see. Every render is therefore checked for
+  length and for how much of its energy is above 4 kHz, and a render that fails is
+  re-rolled at a different number of diffusion steps (see `RENDER_ATTEMPTS`). The
+  check runs on the decoded audio, so it costs a little arithmetic and no extra
+  inference unless something actually went wrong.
 
     python -m live_transcribe.engine_tts_server
     python -m live_transcribe.engine_tts_server --cpu
@@ -50,7 +53,56 @@ DEFAULT_DIFFUSION_STEPS = 5
 """The library's default. More is more varied and slower, and likelier to blow up."""
 
 SAFE_DIFFUSION_STEPS = 3
-"""What a saturated render is retried with."""
+"""What a blown-up render is retried with."""
+
+# -- what a blown-up render looks like, and how to get a good one instead ------ #
+#
+# StyleTTS 2 fails at random on short text: the style vector is resampled per call
+# and the duration predictor occasionally runs away with it. Measured on this
+# machine, rendering the single word "you" twelve times through the live engine gave
+# 0.37-4.57 s of audio, and 9 of the 12 renders were unusable -- seconds of
+# broadband buzz at 64-95% of their energy above 4 kHz, which is what "the voice
+# started tweaking out" sounds like from the listener's side. One word is a third of
+# a second of speech, so 4.5 s of it is not a slow voice, it is a failed render.
+#
+# Two things separate a good render from a bad one, and neither is loudness: three
+# of the failures peaked at 0.04-0.04 while good renders peaked at 0.4-0.6. The
+# first diagnostic is *length*; the second is that a failed render is broadband
+# noise rather than a voice, so nearly all of its energy sits above 4 kHz.
+#
+# The fix is the same shape as the saturation guard it replaces, and better: a
+# failed render is re-rolled at a different number of diffusion steps. The failure
+# is random and the step count only changes which random draws are used, so a
+# re-roll at the *same* count works about as well -- measured, a retry at 3 steps
+# fixed 3 of the 4 failures while a second attempt at 5 fixed the same ones.
+# Re-rolling rather than dropping matters: the alternative is silence where a word
+# should be, which is worse than a word in the wrong voice.
+MAX_SPOKEN_SECONDS_PER_WORD = 0.8
+"""A phone is clipped beyond this. Real speech runs 0.17-0.25 s per word."""
+
+MIN_SPOKEN_SECONDS = 1.5
+"""Floor for the length check, so one short word is allowed to take its time."""
+
+MAX_NOISE_SHARE = 0.30
+"""Ceiling on the share of energy above 4 kHz.
+
+A healthy render measured 0.004-0.19 here; every failed one measured 0.64-0.95.
+The gap is wide enough that the exact value does not matter.
+"""
+
+NOISE_LOW_HZ, NOISE_HIGH_HZ = 4000.0, 11000.0
+"""The band that tells noise from voice, and the band it is compared against."""
+
+VOICE_LOW_HZ, VOICE_HIGH_HZ = 100.0, 2000.0
+
+RENDER_ATTEMPTS = (None, SAFE_DIFFUSION_STEPS, 4, 6)
+"""Diffusion steps to try, in order; ``None`` means "whatever was asked for".
+
+The low step counts are the stable ones and go first, exactly as the saturation
+guard had them. The others are there because the check above is stricter than that
+guard was: it can reject the very first render, and then the fallback has to be able
+to succeed on its own rather than trusting that three steps are always clean.
+"""
 
 MAX_TEXT_CHARS = 1200
 """Roughly the point where the library splits the request itself."""
@@ -468,6 +520,67 @@ def pcm16_to_wav(pcm: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
     return buffer.getvalue()
 
 
+def spoken_seconds_ceiling(text: str) -> float:
+    """The longest a faithful render of `text` could honestly be.
+
+    Words are counted rather than characters because the failure being caught is the
+    duration predictor losing its place, which scales with words. Digits are spelled
+    out by the library before it ever gets here, so they count as ordinary words.
+    """
+    words = len([w for w in str(text).split() if any(c.isalnum() for c in w)])
+    return max(MIN_SPOKEN_SECONDS, MAX_SPOKEN_SECONDS_PER_WORD * max(1, words))
+
+
+def noise_share(samples) -> float:
+    """The share of a clip's energy that sits above 4 kHz.
+
+    A voice puts almost everything into its low harmonics; a failed render is a
+    hiss, and this is the number that tells them apart -- without a single
+    threshold on loudness, which is what the old peak-only guard got wrong.
+    """
+    import numpy as np
+
+    data = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if data.size < 64:
+        return 0.0
+    spectrum = np.abs(np.fft.rfft(data * np.hanning(data.size))) ** 2
+    freqs = np.fft.rfftfreq(data.size, 1.0 / SAMPLE_RATE)
+    high = float(spectrum[(freqs >= NOISE_LOW_HZ) & (freqs < NOISE_HIGH_HZ)].sum())
+    low = float(spectrum[(freqs >= VOICE_LOW_HZ) & (freqs < VOICE_HIGH_HZ)].sum())
+    return high / (high + low + 1e-12)
+
+
+def render_problem(samples, text: str) -> str:
+    """Why this render is not speech, or "" when it is fine.
+
+    The three failures are reported separately because they need different fixes and
+    because the distinction is the whole diagnosis: a saturated render is the decoder,
+    a noisy one is the style vector producing something the vocoder cannot voice, and
+    an over-long one is the duration predictor losing its place.
+
+    Noise is checked before length on purpose. A failed render is usually both long
+    and noisy, and the noise is the more specific of the two -- it says *what* is
+    wrong, where the length only says how much of it there is.
+    """
+    import numpy as np
+
+    data = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if data.size == 0:
+        return "empty render"
+    peak = float(np.max(np.abs(data)))
+    if peak >= 0.999:
+        return "saturated (full-scale)"
+    share = noise_share(data)
+    if share > MAX_NOISE_SHARE:
+        return f"noise instead of voice ({share * 100:.0f}% of energy above 4 kHz)"
+    seconds = data.size / float(SAMPLE_RATE)
+    ceiling = spoken_seconds_ceiling(text)
+    if seconds > ceiling:
+        words = len([w for w in str(text).split() if any(c.isalnum() for c in w)])
+        return f"runaway length ({seconds:.2f}s for {words} word(s), cap {ceiling:.2f}s)"
+    return ""
+
+
 def wav_info(path: Path) -> tuple[float, int, str]:
     """(seconds, sample_rate, problem) for a candidate reference clip.
 
@@ -530,7 +643,9 @@ class StyleEngine:
         self.load_error = ""
         self.load_seconds = 0.0
         self.synthesised = 0
-        self.saturation_retries = 0
+        self.runaway_retries = 0
+        """How many requests needed more than one render, good or bad. Reported so a
+        voice that re-rolls constantly is visible rather than merely audible."""
         self.config_data: dict = {}
         self._config_file: Path | None = None
         self._styles: dict[str, object] = {}
@@ -676,7 +791,14 @@ class StyleEngine:
 
     # -- speech ------------------------------------------------------------ #
     def synthesize(self, text: str, steps: int | None = None) -> dict:
-        """Render `text` in the current voice. Returns PCM and the numbers about it."""
+        """Render `text` in the current voice, re-rolling a blown-up render.
+
+        A render that fails `render_problem` is thrown away and re-rolled at the next
+        step count in `RENDER_ATTEMPTS`, because the failure is random: the same text
+        and the same voice produce seconds of buzz on one draw and a clean word on the
+        next. Only if every attempt fails is the last one returned -- a distorted word
+        still carries the sentence, and silence does not.
+        """
         import numpy as np  # noqa: PLC0415
 
         with self._lock:
@@ -684,29 +806,43 @@ class StyleEngine:
                 raise RuntimeError(self.load_error or "the model is not loaded")
             reference = self.reference if (self.reference and self.reference.is_file()) else None
             style = self.style_for(reference) if reference is not None else None
-            wanted = int(steps or self.diffusion_steps)
+            target_voice = str(reference) if reference else None
+            base_steps = int(steps or self.diffusion_steps)
+
+            wanted = base_steps
+            audio = None
+            problem = ""
+            attempts = 0
             started = time.perf_counter()
-            audio = self.model.inference(
-                text,
-                target_voice_path=(str(reference) if reference else None),
-                output_sample_rate=SAMPLE_RATE,
-                diffusion_steps=wanted,
-                ref_s=style,
-            )
-            peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-            if peak >= 0.999 and wanted > SAFE_DIFFUSION_STEPS:
-                # A full-scale, flat-topped render is the duration predictor having
-                # run away, not a loud voice. Retry lower, where it does not happen.
-                self.saturation_retries += 1
+            # A later entry equal to an earlier one would just repeat a draw, so the
+            # ladder is deduplicated while keeping its order and its first entry (the
+            # setting the caller actually asked for).
+            ladder: list[int] = []
+            for step_option in RENDER_ATTEMPTS:
+                candidate = base_steps if step_option is None else int(step_option)
+                if candidate not in ladder:
+                    ladder.append(candidate)
+            for wanted in ladder:
+                attempts += 1
                 audio = self.model.inference(
                     text,
-                    target_voice_path=(str(reference) if reference else None),
+                    target_voice_path=target_voice,
                     output_sample_rate=SAMPLE_RATE,
-                    diffusion_steps=SAFE_DIFFUSION_STEPS,
+                    diffusion_steps=wanted,
                     ref_s=style,
                 )
-                peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-                wanted = SAFE_DIFFUSION_STEPS
+                problem = render_problem(audio, text)
+                if not problem:
+                    break
+            assert audio is not None, "the render ladder is never empty"
+            if problem:
+                # Every draw failed. The last one is still returned -- a distorted
+                # word carries the sentence, and silence does not -- but the log line
+                # below is what makes that visible rather than mysterious.
+                self.runaway_retries += 1
+            elif attempts > 1:
+                self.runaway_retries += 1
+            peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
             self.synthesised += 1
             rms = float(np.sqrt(np.mean(np.square(audio)))) if len(audio) else 0.0
             return {
@@ -716,6 +852,9 @@ class StyleEngine:
                 "sample_rate": SAMPLE_RATE,
                 "seconds": len(audio) / float(SAMPLE_RATE),
                 "diffusion_steps": wanted,
+                "attempts": attempts,
+                "noise_share": round(noise_share(audio), 4),
+                "render_problem": problem,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "reference_path": str(reference) if reference else None,
                 "cloned": reference is not None,
@@ -733,7 +872,13 @@ class StyleEngine:
             "checkpoint": str(self.checkpoint),
             "diffusion_steps": self.diffusion_steps,
             "synthesised": self.synthesised,
-            "saturation_retries": self.saturation_retries,
+            "rerendered": self.runaway_retries,
+            "render_guard": {
+                "max_seconds_per_word": MAX_SPOKEN_SECONDS_PER_WORD,
+                "min_seconds": MIN_SPOKEN_SECONDS,
+                "max_noise_share": MAX_NOISE_SHARE,
+                "attempt_steps": [int(s or self.diffusion_steps) for s in RENDER_ATTEMPTS],
+            },
             "load_seconds": round(self.load_seconds, 1),
             "vram_mb": vram_mb(),
             "load_error": self.load_error,
@@ -850,6 +995,9 @@ class Handler(BaseHTTPRequestHandler):
             "peak": result["peak"],
             "rms": result["rms"],
             "diffusion_steps": result["diffusion_steps"],
+            "attempts": result["attempts"],
+            "noise_share": result["noise_share"],
+            "render_problem": result["render_problem"],
             "elapsed_ms": result["elapsed_ms"],
             "reference_path": result["reference_path"],
             "cloned": result["cloned"],

@@ -540,7 +540,7 @@ The engine is this project's own: `live_transcribe\engine_tts_server.py`, starte
 the Python 3.11 environment `Setup.bat` builds under `engine/styletts2/.venv`. It calls
 the `styletts2` package from PyPI with the LibriTTS checkpoint
 (`epochs_2nd_00020.pth`), and adds the three in-memory fixes described under
-[Setup](#three-library-defects-the-engine-patches-at-startup), a saturation retry, and
+[Setup](#three-library-defects-the-engine-patches-at-startup), a render guard, and
 a single-request-at-a-time guard around the one GPU. `live_transcribe\tts.py` is only
 the HTTP client, and the API is the one it already spoke:
 
@@ -556,8 +556,22 @@ Text → phonemes → duration predictor → style vector sampled from your refe
 wav → pitch/energy → diffusion acoustic model (3 steps) → HiFi-GAN vocoder →
 24 kHz mono PCM. **Volume is generated, not applied**: the vocoder decides the
 amplitude of every sample, and the only explicit gain in the path is the
-quiet-rescue, which scales upward to keep a faint draw audible. The server
-refuses a draw that comes out saturated rather than returning a screech.
+quiet-rescue, which scales upward to keep a faint draw audible.
+
+**The render guard.** StyleTTS 2 fails at random on short text, and the failure is
+not always loud. Rendering the single word "you" twelve times through the live
+engine produced 0.37–4.57 s of audio, and nine of those twelve were unusable —
+seconds of broadband hiss for one syllable, which is what "the voice started
+tweaking out" sounds like from the other side. Only some of them clipped; the rest
+peaked at 0.04–0.4, so the old peak-only check could not see them at all. Every
+render is now checked for three things — full-scale saturation, length against a
+per-word ceiling, and the share of its energy above 4 kHz, which is what separates
+a voice (measured 0.4–19%) from a hiss (measured 64–95%). A render that fails any
+of them is thrown away and re-rolled at the next number of diffusion steps in
+`RENDER_ATTEMPTS`; measured, that turned 9 bad renders out of 12 into 0, at the
+cost of re-rolling 2 of the 12. `GET /health` reports `rerendered` and the
+thresholds in use, and `/synthesize` returns `attempts`, `noise_share` and
+`render_problem` for the render it just made.
 
 Two details this stage adds on top:
 
@@ -573,6 +587,12 @@ Two details this stage adds on top:
   the sentence's punctuation arrives, because that is what sounds most natural.
   `--mode word` will follow your speech closely instead, at the cost of choppier
   delivery (see above).
+* **`word` mode is the engine's worst case.** Each word becomes its own synthesis
+  call, and short inputs are exactly where StyleTTS 2 fails at random — that is what
+  the render guard above exists for. It also costs a full inference per word
+  (measured 0.3–0.8 s) to produce a third of a second of speech, so a fast speaker
+  can outrun it and the pipeline drops the oldest waiting words to stay current.
+  `chunk` mode is the recommendation; `word` is there for maximum responsiveness.
 * **VRAM.** StyleTTS 2 uses ~1.1 GB on top of the Whisper engine's ~0.5 GB.
   With 8 GB total this is fine, but it competes with games.
 * **Stage 1 needs the right microphone.** Both engines currently read the Windows

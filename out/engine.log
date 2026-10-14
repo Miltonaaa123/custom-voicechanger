@@ -1,0 +1,39 @@
+
+--- starting 2026-10-13 22:19:35 ---
+  Rixers Custom Voice Changer - speech engine
+  python    : 3.11.9
+  torch     : cuda (NVIDIA GeForce RTX 3060 Ti, torch 2.5.1+cu121)
+  checkpoint: C:\Users\oxsta\Desktop\custom voicechanger\engine\styletts2\epochs_2nd_00020.pth
+  reference : C:\Users\oxsta\Desktop\custom voicechanger\voices\default.wav
+  loading the model (60-90 s is normal) ...
+  listening : http://127.0.0.1:9881
+[nltk_data] Downloading package punkt to
+[nltk_data]     C:\Users\oxsta\AppData\Roaming\nltk_data...
+[nltk_data]   Package punkt is already up-to-date!
+  patch     : fixed the library's string join in load_plbert
+  patch     : fixed the library's inverted F0_path check
+  patch     : reference clips are read with soundfile, not librosa
+C:\Users\oxsta\Desktop\custom voicechanger\engine\styletts2\.venv\Lib\site-packages\torch\nn\utils\weight_norm.py:143: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+C:\Users\oxsta\Desktop\custom voicechanger\engine\styletts2\.venv\Lib\site-packages\torch\nn\modules\rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+bert loaded
+bert_encoder loaded
+predictor loaded
+decoder loaded
+text_encoder loaded
+predictor_encoder loaded
+style_encoder loaded
+diffusion loaded
+text_aligner loaded
+pitch_extractor loaded
+mpd loaded
+msd loaded
+wd loaded
+  ready in 9.0s (cuda (NVIDIA GeForce RTX 3060 Ti, torch 2.5.1+cu121), reference: default.wav)
+177
+177
+177
+177
+177
+177
